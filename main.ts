@@ -12,11 +12,26 @@
 //     * kernel-weighted median: weight exp(-(ln v1_c - ln p1)^2 / 2) — launches whose
 //       hour-1 size matches the target's count most;
 //     * weighted least-squares regression of r(h) on ln v1_c, evaluated at ln p1;
-//     * the median is the 50/50 blend of the two (robust + smooth, no wild extrapolation
-//       when p1 sits beyond every comparable: the kernel part saturates at the biggest
-//       launches, the regression part is halved by the blend).
-//   Spread is the kernel-weighted interquartile range of r(h) / 1.349 — an honest spread:
-//   pinball loss punishes a band that is too narrow and one that is too wide alike.
+//     * the median is a 25/75 blend of the two (round-2 tuning, see below): the
+//       regression carries more weight because it tracks the size→rise slope better,
+//       while the kernel part still anchors the estimate so a beyond-range p1 cannot
+//       extrapolate wildly (verified: at a 2x-inflated anchor the tuned blend beats
+//       the 50/50 blend on held-out giants).
+//   Spread is the kernel-weighted interquartile range of r(h) / 1.349, scaled by 0.9 —
+//   an honest spread: pinball loss punishes a band that is too narrow and one that is
+//   too wide alike; round-2 grid found v1's band slightly too wide on both practice
+//   and leave-one-out.
+//
+//   Round-2 tuning (grid over bandwidth / blend / spread multiplier, accepted only if
+//   it improves BOTH practice mean and leave-one-out over 37 curves):
+//     bandwidth 1.0 -> 1.3, blend kernel/regression 50/50 -> 25/75, spread x0.9.
+//     Practice mean 0.1949 -> 0.1814, LOO 0.4006 -> 0.3906 (baseline 0.3871 / 0.9297).
+//     Rejected by the same grid: asymmetric spread, empirical-quantile spread, a
+//     rise-boost for small launches (helps one practice case, wrecks LOO), hour-1
+//     channels-per-viewer and the pre-release launch multiplier (both double-count
+//     the ln(v1) regression); minute-shape / top-stream signals exist only in the
+//     final case, so no validated adjustment could be built from them — the entry
+//     reads only known/forecast/comparables and ignores the rest.
 //   Tier weights: "comparable" 1.0, "early-access-contaminated" 0.5, "weak" 0.5,
 //   "target-history" 0 (the GTA VI category's own pre-release history is not a launch
 //   curve). A comparable counts only with a real hour 1 and >= 20 hours of its day.
@@ -40,7 +55,9 @@ const LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95];
 /** The standard normal's quantile at each level. */
 const Z = [-1.645, -0.674, 0, 0.674, 1.645];
 /** Gaussian kernel bandwidth in ln(viewers) units, for scale-local weighting. */
-const BANDWIDTH = 1.0;
+const BANDWIDTH = 1.3;
+/** Spread multiplier (round-2 tuning): v1's band was slightly too wide. */
+const SPREAD_MULT = 0.9;
 /** House baseline's log-spread per sqrt-hour, used only as a fallback. */
 const BASE_SIGMA = 0.15;
 
@@ -142,7 +159,7 @@ function hourForecast(
   const sxy = pts.reduce((s, p) => s + p.w * (p.lx - mx) * (p.r - my), 0);
   const b = sxx > 0 ? sxy / sxx : 0;
   const rmed = my - b * mx + b * L;
-  const med = 0.5 * kmed + 0.5 * rmed;
+  const med = 0.25 * kmed + 0.75 * rmed;
 
   const pairs = pts.map((p) => [p.r, p.w] as [number, number]);
   const spread = Math.max(
@@ -161,7 +178,7 @@ function hourQuantiles(
   const f = hourForecast(curves, p1, h);
   const qs = Z.map((z) => {
     if (f === null) return p1 * Math.exp(z * BASE_SIGMA * Math.sqrt(h - 1));
-    return p1 * Math.exp(f.med + z * f.spread);
+    return p1 * Math.exp(f.med + z * f.spread * SPREAD_MULT);
   });
   // Round, clamp to (0, 1e9], enforce non-decreasing.
   let prev = 0;
