@@ -9,18 +9,20 @@
 //   already huge at 00:00 UTC rises little, a small hour-1 print rises a lot (the US
 //   audience only joins after 05:00-08:00 UTC). So for the target's hour-1 print p1 we
 //   estimate, per hour h, a scale-local median of r(h):
-//     * kernel-weighted median: weight exp(-(ln v1_c - ln p1)^2 / 2) — launches whose
-//       hour-1 size matches the target's count most;
-//     * weighted least-squares regression of r(h) on ln v1_c, evaluated at ln p1;
-//     * the median is a 25/75 blend of the two (round-2 tuning, see below): the
-//       regression carries more weight because it tracks the size→rise slope better,
-//       while the kernel part still anchors the estimate so a beyond-range p1 cannot
-//       extrapolate wildly (verified: at a 2x-inflated anchor the tuned blend beats
-//       the 50/50 blend on held-out giants).
-//   Spread is the kernel-weighted interquartile range of r(h) / 1.349, scaled by 0.9 —
-//   an honest spread: pinball loss punishes a band that is too narrow and one that is
-//   too wide alike; round-2 grid found v1's band slightly too wide on both practice
-//   and leave-one-out.
+//     * weighted least-squares regression of r(h) on ln v1_c, evaluated at ln p1,
+//       slope inflated x1.1 (regression-dilution correction);
+//     * the centre is the regression prediction PLUS the kernel-weighted median
+//       of the residuals around the slope-inflated fit at each curve's own ln(v1)
+//       (round 4). The regression estimates a conditional MEAN; r(h) is strongly
+//       right-skewed (late hours: median +0.85, q95 +7.0 pooled), so the residual
+//       median — not a kernel median blended with the mean — is the correct centre
+//       for q50, and it extrapolates better to beyond-range giants.
+//   Spread is ONE pooled value for all hours: the mean of the 23 hourly
+//   kernel-weighted IQRs / 1.349, scaled by 0.8 (round 5). The per-hour IQR
+//   estimates are noisy (effective n ~5-10 after kernel weighting) while the true
+//   conditional dispersion varies slowly with h, so pooling removes noise.
+//   An honest spread: pinball loss punishes a band that is too narrow and one that is
+//   too wide alike.
 //
 //   Round-2 tuning (grid over bandwidth / blend / spread multiplier, accepted only if
 //   it improves BOTH practice mean and leave-one-out over 37 curves):
@@ -49,6 +51,47 @@
 //     blend by effective sample size, per-hour spread bands, tier reweighting
 //     (incl. early-access 0.75: LOO 0.3806 but practice 0.1866), smult 0.85
 //     (practice 0.1762 but weaker 2x-anchor extrapolation).
+//
+//   Round-4 (target: a NEW estimator, not constant tuning):
+//     (1) residual-median centre (see above) replaces the kernel/regression blend;
+//     (2) one pooled spread (mean of the 23 hourly IQRs) replaces per-hour spreads;
+//     (3) spread multiplier 0.9 -> 0.85.
+//     Practice mean 0.1787 -> 0.1745, LOO 0.3853 -> 0.3737, 2x-anchor stress
+//     0.3413 -> 0.3221, 1.5x-anchor 0.2005 -> 0.1761 (mirror-verified, real entry).
+//     Rejected in round 4 (each failed the BOTH rule — improve BOTH practice and
+//     LOO, anchor 2x not worse):
+//     launch-type conditioning (SIM/MIX/ROLL tags from unlock text: practice
+//     worsened in every grid point, e.g. 0.1802-0.1901; LOO ~flat; anchor worse),
+//     excluding/downweighting "pre-launch hour-1" curves (v1 < 2% of peak:
+//     practice 0.1989, LOO 0.6796 — the tiny launches are load-bearing signal
+//     for small targets, not artifacts), empirical/asymmetric/type-conditional
+//     spreads, k-NN restriction (k=8: 0.2375/0.4124), tricube-style local
+//     windows, launch-multiplier / channels-per-viewer / pre-launch-momentum
+//     second features (partial corr with residual rise -0.17..+0.19: dead),
+//     per-hour spread smoothing alone (helps, but pooling is strictly better),
+//     linear-in-h spread (LOO 0.3859), smult 0.95 with the new centre
+//     (practice 0.1791), smult 0.8 (anchor 0.3435 > v3).
+//
+//   Round-5 (target: push further on the round-4 centre — wider kernel + tighter
+//     spread + stronger median smoothing):
+//     bandwidth 1.6/1.0 -> 2.2/1.3, spread multiplier 0.85 -> 0.8, median
+//     smoothing 0.25 -> 0.5. A wider kernel leans more on the global
+//     size->rise relation and less on local neighbours; the LOO gain is
+//     concentrated in the worst curves (Silksong -0.076, Marathon -0.062,
+//     RE Requiem -0.056; worst regression +0.022) and ALL FIVE anchor giants
+//     improve (Elden Ring 0.310 -> 0.249, Cyberpunk 0.307 -> 0.242, Diablo
+//     0.179 -> 0.161, Hogwarts 0.441 -> 0.378, TLOU 0.373 -> 0.335).
+//     Practice mean 0.1745 -> 0.1738, LOO 0.3737 -> 0.3707, 2x-anchor stress
+//     0.3221 -> 0.2729, 1.5x-anchor 0.1761 -> 0.1646 (mirror-verified, real entry).
+//     Rejected in round 5 (each failed the BOTH rule):
+//     launch-type conditioning on the new centre (still hurts practice in
+//     every grid point, 0.1772-0.1864; LOO ~flat), residual trimmed-mean
+//     centre (practice 0.1707 + anchor 0.3051 but LOO 0.3828), quadratic
+//     regression fit (practice 0.1474 but LOO 0.4698 — overfits the 4 practice
+//     cases), residual-based pooled spread (practice 0.1692 but LOO 0.3839,
+//     anchor 0.3518), extrapolation damping (anchor 0.3641-0.4191 — the anchor
+//     wants MORE extrapolation, not less), slope 1.2-1.3 (anchor 0.2995-0.3108
+//     but LOO 0.3751-0.3769), even wider bandwidth 2.3/1.35 (practice 0.1752).
 //   Tier weights: "comparable" 1.0, "early-access-contaminated" 0.5, "weak" 0.5,
 //   "target-history" 0 (the GTA VI category's own pre-release history is not a launch
 //   curve). A comparable counts only with a real hour 1 and >= 20 hours of its day.
@@ -71,18 +114,15 @@ const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 const LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95];
 /** The standard normal's quantile at each level. */
 const Z = [-1.645, -0.674, 0, 0.674, 1.645];
-/** Gaussian kernel bandwidth in ln(viewers) units; ramps 1.6 -> 1.0 over hours 2..24. */
-const BANDWIDTH_EARLY = 1.6;
-const BANDWIDTH_LATE = 1.0;
-/** Kernel weight in the median blend; ramps 0.5 -> 0.1 over hours 2..24. */
-const KERNEL_W_EARLY = 0.5;
-const KERNEL_W_LATE = 0.1;
+/** Gaussian kernel bandwidth in ln(viewers) units; ramps 2.2 -> 1.3 over hours 2..24 (round 5). */
+const BANDWIDTH_EARLY = 2.2;
+const BANDWIDTH_LATE = 1.3;
 /** Regression-slope inflation (regression-dilution correction). */
 const SLOPE_MULT = 1.1;
-/** Median smoothing across neighbouring hours. */
-const SMOOTH = 0.25;
-/** Spread multiplier (round-2 tuning): v1's band was slightly too wide. */
-const SPREAD_MULT = 0.9;
+/** Median smoothing across neighbouring hours (round 5: 0.5). */
+const SMOOTH = 0.5;
+/** Spread multiplier (round-5 tuning with the pooled spread). */
+const SPREAD_MULT = 0.8;
 /** House baseline's log-spread per sqrt-hour, used only as a fallback. */
 const BASE_SIGMA = 0.15;
 
@@ -178,7 +218,6 @@ function hourForecast(
   const totalW = pts.reduce((s, p) => s + p.w, 0);
   if (!(totalW > 0)) return null;
 
-  const kmed = weightedMedian(pts.map((p) => [p.r, p.w] as [number, number]));
   // Weighted least squares of r on ln(v1), evaluated at ln(p1), slope inflated.
   const mx = pts.reduce((s, p) => s + p.w * p.lx, 0) / totalW;
   const my = pts.reduce((s, p) => s + p.w * p.r, 0) / totalW;
@@ -186,8 +225,10 @@ function hourForecast(
   const sxy = pts.reduce((s, p) => s + p.w * (p.lx - mx) * (p.r - my), 0);
   const b = sxx > 0 ? sxy / sxx : 0;
   const rmed = my + SLOPE_MULT * b * (L - mx);
-  const wk = KERNEL_W_EARLY + (KERNEL_W_LATE - KERNEL_W_EARLY) * t;
-  const med = wk * kmed + (1 - wk) * rmed;
+  // Round-4 centre: regression prediction + kernel-weighted median of the
+  // residuals around the slope-inflated fit at each curve's own ln(v1).
+  const res = pts.map((p) => [p.r - (my + SLOPE_MULT * b * (p.lx - mx)), p.w] as [number, number]);
+  const med = rmed + weightedMedian(res);
 
   const pairs = pts.map((p) => [p.r, p.w] as [number, number]);
   const spread = Math.max(
@@ -226,6 +267,21 @@ function allHours(
 ): Map<number, { med: number; spread: number } | null> {
   const raw = new Map<number, { med: number; spread: number } | null>();
   for (let h = 2; h <= 24; h++) raw.set(h, hourForecast(curves, p1, h));
+  // Round-4: one pooled spread — the mean of the 23 hourly IQR spreads.
+  // Per-hour IQRs are noisy (effective n ~5-10 after kernel weighting) while
+  // the true conditional dispersion varies slowly with h.
+  const spreads: number[] = [];
+  for (let h = 2; h <= 24; h++) {
+    const f = raw.get(h);
+    if (f !== undefined && f !== null) spreads.push(f.spread);
+  }
+  if (spreads.length > 0) {
+    const pooled = spreads.reduce((s, v) => s + v, 0) / spreads.length;
+    for (let h = 2; h <= 24; h++) {
+      const f = raw.get(h);
+      if (f !== undefined && f !== null) raw.set(h, { med: f.med, spread: pooled });
+    }
+  }
   for (let h = 2; h <= 24; h++) {
     const f = raw.get(h);
     if (f === undefined || f === null) continue;
