@@ -24,10 +24,13 @@ game launches with full release-day hourly curves:
    −0.93 by hour 21: a launch already huge at 00:00 UTC rises little, a
    small hour-1 print rises a lot as the US audience joins after
    05:00–08:00 UTC). So per hour we estimate a **scale-local median** of
-   `r(h)`: a Gaussian-kernel-weighted median (bandwidth 1.0 in log viewers,
-   launches whose hour-1 size matches the target's count most) blended
-   50/50 with a weighted least-squares regression of `r(h)` on
-   `ln(hour-1)`.
+   `r(h)`: a Gaussian-kernel-weighted median blended with a weighted
+   least-squares regression of `r(h)` on `ln(hour-1)`. Both the kernel
+   bandwidth (1.6 → 1.0) and the kernel weight in the blend (0.5 → 0.1)
+   ramp with the hour, since the size→rise link strengthens through the
+   day; the regression slope is inflated ×1.1 (regression-dilution
+   correction); neighbouring hours share information (median smoothed 25%
+   across h−1/h+1).
 3. The spread is the kernel-weighted interquartile range of `r(h)` / 1.349
    — an honest spread, since pinball loss punishes a band that is too
    narrow and one that is too wide alike.
@@ -42,14 +45,16 @@ Quantiles: `q = p1 * exp(median(h) + z * spread(h))`, with
 
 | Case | This forecaster | House baseline |
 |---|---|---|
-| Marvel's Wolverine (p00) | 0.247 | 0.744 |
-| Red Dead Redemption 2 (p01) | 0.187 | 0.287 |
-| God of War Ragnarök (p02) | 0.147 | 0.215 |
-| Marvel's Spider-Man 2 (p03) | 0.199 | 0.303 |
-| **Mean** | **0.195** | **0.387** |
+| Marvel's Wolverine (p00) | 0.194 | 0.744 |
+| Red Dead Redemption 2 (p01) | 0.186 | 0.287 |
+| God of War Ragnarök (p02) | 0.140 | 0.215 |
+| Marvel's Spider-Man 2 (p03) | 0.195 | 0.303 |
+| **Mean** | **0.179** | **0.387** |
 
-Typical miss 21–56% (baseline 42–189%), 90% coverage 0.78–1.00.
-Leave-one-out over the 37 usable comparables: 0.40 vs baseline 0.93.
+Typical miss 22–38% (baseline 42–189%), 90% coverage 0.78–1.00.
+Leave-one-out over the 37 usable comparables: 0.385 vs baseline 0.93
+(0.391 in round 2; round-3 changes: per-hour bandwidth/blend ramps,
+slope ×1.1, median smoothing — see `main.ts` header).
 
 Run locally:
 
