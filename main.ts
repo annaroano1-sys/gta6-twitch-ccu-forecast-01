@@ -32,6 +32,23 @@
 //     the ln(v1) regression); minute-shape / top-stream signals exist only in the
 //     final case, so no validated adjustment could be built from them — the entry
 //     reads only known/forecast/comparables and ignores the rest.
+//
+//   Round-3 tuning (target: LOO generalisation — the final is one unseen case):
+//     the size→rise link strengthens through the day (corr(ln v1, r(h)) grows
+//     with h), so both the kernel bandwidth and the kernel/regression blend
+//     now ramp with h: bandwidth 1.6 -> 1.0 (wide early, when size barely
+//     matters, narrow late, when it matters most) and kernel weight 0.5 -> 0.1
+//     (median early, regression late); the regression slope is inflated x1.1
+//     (regression-dilution correction — big launches were systematically
+//     over-predicted late in the day); neighbouring hours share information
+//     (median smoothed 25% across h-1/h+1, curves are smooth in h).
+//     Practice mean 0.1814 -> 0.1787, LOO 0.3906 -> 0.3854, LOO-big 0.2107 ->
+//     0.2086, 2x-anchor stress 0.4257 -> 0.4154 (baseline 0.3871 / 0.9297).
+//     Rejected in round 3 (each failed the BOTH rule or added nothing):
+//     winsorised r, Huber IRLS regression, quadratic regression, adaptive
+//     blend by effective sample size, per-hour spread bands, tier reweighting
+//     (incl. early-access 0.75: LOO 0.3806 but practice 0.1866), smult 0.85
+//     (practice 0.1762 but weaker 2x-anchor extrapolation).
 //   Tier weights: "comparable" 1.0, "early-access-contaminated" 0.5, "weak" 0.5,
 //   "target-history" 0 (the GTA VI category's own pre-release history is not a launch
 //   curve). A comparable counts only with a real hour 1 and >= 20 hours of its day.
@@ -54,8 +71,16 @@ const OUTPUT_DIR = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 const LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95];
 /** The standard normal's quantile at each level. */
 const Z = [-1.645, -0.674, 0, 0.674, 1.645];
-/** Gaussian kernel bandwidth in ln(viewers) units, for scale-local weighting. */
-const BANDWIDTH = 1.3;
+/** Gaussian kernel bandwidth in ln(viewers) units; ramps 1.6 -> 1.0 over hours 2..24. */
+const BANDWIDTH_EARLY = 1.6;
+const BANDWIDTH_LATE = 1.0;
+/** Kernel weight in the median blend; ramps 0.5 -> 0.1 over hours 2..24. */
+const KERNEL_W_EARLY = 0.5;
+const KERNEL_W_LATE = 0.1;
+/** Regression-slope inflation (regression-dilution correction). */
+const SLOPE_MULT = 1.1;
+/** Median smoothing across neighbouring hours. */
+const SMOOTH = 0.25;
 /** Spread multiplier (round-2 tuning): v1's band was slightly too wide. */
 const SPREAD_MULT = 0.9;
 /** House baseline's log-spread per sqrt-hour, used only as a fallback. */
@@ -138,12 +163,14 @@ function hourForecast(
   h: number,
 ): { med: number; spread: number } | null {
   const L = Math.log(p1);
+  const t = (h - 2) / 22; // 0 at h=2, 1 at h=24
+  const bw = BANDWIDTH_EARLY + (BANDWIDTH_LATE - BANDWIDTH_EARLY) * t;
   const pts: Array<{ r: number; w: number; lx: number }> = [];
   for (const c of curves) {
     const vh = c.hours.get(h);
     if (vh === undefined || c.tierW === 0) continue;
     const lx = Math.log(c.v1);
-    const w = Math.exp(-((lx - L) ** 2) / (2 * BANDWIDTH * BANDWIDTH)) * c.tierW;
+    const w = Math.exp(-((lx - L) ** 2) / (2 * bw * bw)) * c.tierW;
     if (w <= 0) continue;
     pts.push({ r: Math.log(vh / c.v1), w, lx });
   }
@@ -152,14 +179,15 @@ function hourForecast(
   if (!(totalW > 0)) return null;
 
   const kmed = weightedMedian(pts.map((p) => [p.r, p.w] as [number, number]));
-  // Weighted least squares of r on ln(v1), evaluated at ln(p1).
+  // Weighted least squares of r on ln(v1), evaluated at ln(p1), slope inflated.
   const mx = pts.reduce((s, p) => s + p.w * p.lx, 0) / totalW;
   const my = pts.reduce((s, p) => s + p.w * p.r, 0) / totalW;
   const sxx = pts.reduce((s, p) => s + p.w * (p.lx - mx) ** 2, 0);
   const sxy = pts.reduce((s, p) => s + p.w * (p.lx - mx) * (p.r - my), 0);
   const b = sxx > 0 ? sxy / sxx : 0;
-  const rmed = my - b * mx + b * L;
-  const med = 0.25 * kmed + 0.75 * rmed;
+  const rmed = my + SLOPE_MULT * b * (L - mx);
+  const wk = KERNEL_W_EARLY + (KERNEL_W_LATE - KERNEL_W_EARLY) * t;
+  const med = wk * kmed + (1 - wk) * rmed;
 
   const pairs = pts.map((p) => [p.r, p.w] as [number, number]);
   const spread = Math.max(
@@ -169,13 +197,12 @@ function hourForecast(
   return { med, spread };
 }
 
-/** The five quantiles for one hour, or the house baseline when data is missing. */
+/** The five quantiles for one hour from a precomputed median/spread, or the house baseline when data is missing. */
 function hourQuantiles(
-  curves: Array<{ v1: number; hours: Map<number, number>; tierW: number }>,
   p1: number,
   h: number,
+  f: { med: number; spread: number } | null,
 ): number[] {
-  const f = hourForecast(curves, p1, h);
   const qs = Z.map((z) => {
     if (f === null) return p1 * Math.exp(z * BASE_SIGMA * Math.sqrt(h - 1));
     return p1 * Math.exp(f.med + z * f.spread * SPREAD_MULT);
@@ -190,6 +217,29 @@ function hourQuantiles(
     prev = v;
     return v;
   });
+}
+
+/** Median/spread for every hour 2..24, with medians smoothed across neighbours. */
+function allHours(
+  curves: Array<{ v1: number; hours: Map<number, number>; tierW: number }>,
+  p1: number,
+): Map<number, { med: number; spread: number } | null> {
+  const raw = new Map<number, { med: number; spread: number } | null>();
+  for (let h = 2; h <= 24; h++) raw.set(h, hourForecast(curves, p1, h));
+  for (let h = 2; h <= 24; h++) {
+    const f = raw.get(h);
+    if (f === undefined || f === null) continue;
+    const neigh: number[] = [];
+    for (const hh of [h - 1, h + 1]) {
+      const g = raw.get(hh);
+      if (g !== undefined && g !== null) neigh.push(g.med);
+    }
+    if (neigh.length > 0) {
+      const avg = neigh.reduce((s, v) => s + v, 0) / neigh.length;
+      raw.set(h, { med: (1 - SMOOTH) * f.med + SMOOTH * avg, spread: f.spread });
+    }
+  }
+  return raw;
 }
 
 mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -212,6 +262,7 @@ for (const file of inputs) {
     curves.push({ v1: hours.get(1)!, hours, tierW: tierWeight(comp) });
   }
 
-  const hours = c.forecast.map(({ hour }) => ({ hour, q: hourQuantiles(curves, p1, hour) }));
+  const fmap = allHours(curves, p1);
+  const hours = c.forecast.map(({ hour }) => ({ hour, q: hourQuantiles(p1, hour, fmap.get(hour) ?? null) }));
   writeFileSync(join(OUTPUT_DIR, `${id}.out`), `${JSON.stringify({ hours })}\n`);
 }
